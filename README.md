@@ -5,7 +5,7 @@ Set up virtual environment and install dependencies
 ```console
 python -m venv env
 source env/bin/activate
-pip install rpi.bme280 pymodbus influxdb-client
+pip install rpi.bme280 pymodbus influxdb-client pyserial
 ```
 Set up the environment variables:
 ```console
