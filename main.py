@@ -1,5 +1,8 @@
 import os
 import time
+import smbus2
+import bme280
+
 from pymodbus.client import ModbusSerialClient
 from pymodbus.exceptions import ModbusException
 
@@ -45,6 +48,17 @@ client = ModbusSerialClient(
 influx_client = None
 write_api = None
 
+# --- BME280 config ---
+BME280_ADDRESS = 0x76  # Change if needed
+
+# Set up I2C and BME280
+bus = smbus2.SMBus(1)
+calibration_params = bme280.load_calibration_params(bus, BME280_ADDRESS)
+
+# Timing for BME280 reads
+bme280_last_read = 0
+bme280_interval = 10  # seconds
+
 try:
     # Connect to InfluxDB
     try:
@@ -59,6 +73,7 @@ try:
         print("Connected to Modbus. Reading every second (Ctrl+C to stop)...")
 
         while True:
+            # --- Read wind sensor ---
             try:
                 speed_response = client.read_holding_registers(address=0, count=1, slave=unit_id)
                 dir_response = client.read_holding_registers(address=1, count=1, slave=unit_id)
@@ -70,8 +85,8 @@ try:
                 ):
                     wind_speed_raw = speed_response.registers[0]
                     wind_direction = dir_response.registers[0]
-
                     wind_speed = wind_speed_raw / 100.0
+
                     print(f"Wind speed: {wind_speed:.2f} m/s | Direction: {wind_direction}°")
 
                     if write_api:
@@ -88,9 +103,28 @@ try:
                         print("⚠️ Skipping InfluxDB write (not connected).")
                 else:
                     print("⚠️ Sensor not responding or data invalid.")
-
             except (ModbusException, Exception) as e:
                 print(f"⚠️ Modbus error: {e}")
+
+            # --- Read BME280 every 10 seconds ---
+            now = time.time()
+            if now - bme280_last_read >= bme280_interval:
+                try:
+                    bme_data = bme280.sample(bus, BME280_ADDRESS, calibration_params)
+                    print(f"BME280 | Temp: {bme_data.temperature:.2f} °C | Pressure: {bme_data.pressure:.2f} hPa | Humidity: {bme_data.humidity:.2f} %")
+
+                    if write_api:
+                        point = (
+                            Point("temperature_sensor")
+                            .field("temperature", bme_data.temperature)
+                            .field("pressure", bme_data.pressure)
+                            .field("humidity", bme_data.humidity)
+                        )
+                        write_api.write(bucket=bucket, org=org, record=point)
+                except Exception as e:
+                    print(f"⚠️ BME280 read/write failed: {e}")
+
+                bme280_last_read = now
 
             time.sleep(1)
 
@@ -101,4 +135,5 @@ finally:
     client.close()
     if influx_client:
         influx_client.close()
+    bus.close()
     print("Connections closed.")
