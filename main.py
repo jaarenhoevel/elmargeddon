@@ -2,6 +2,7 @@ import os
 import time
 import smbus2
 import bme280
+import json
 
 from pymodbus.client import ModbusSerialClient
 from pymodbus.exceptions import ModbusException
@@ -44,6 +45,33 @@ client = ModbusSerialClient(
     stopbits=1,
     bytesize=8
 )
+
+# --- Buffer file ---
+buffer_file = os.getenv("BUFFER_FILE")
+if buffer_file is None:
+    buffer_file = "influx_buffer.jsonl"
+
+def buffer_point(point: influxdb_client.Point):
+    """Write unsent point to a buffer file."""
+    with open(buffer_file, "a") as f:
+        f.write(point.to_line_protocol() + "\n")
+
+def flush_buffered_points():
+    """Try to send buffered points if any."""
+    if not os.path.exists(BUFFER_FILE):
+        return
+
+    try:
+        with open(buffer_file, "r") as f:
+            lines = f.readlines()
+
+        if lines:
+            write_api.write(bucket=bucket, org=org, record=lines)
+            os.remove(buffer_file)  # Clear buffer if successful
+            print(f"✅ Flushed {len(lines)} buffered points.")
+    except Exception as e:
+        print(f"⚠️ Failed to flush buffered data: {e}")
+
 
 influx_client = None
 write_api = None
@@ -91,14 +119,19 @@ try:
 
                     if write_api:
                         try:
+                            timestamp = datetime.utcnow()  # or use time.time_ns() for nanosecond precision
+                            
                             point = (
                                 Point("wind_sensor")
                                 .field("speed", wind_speed)
                                 .field("direction", wind_direction)
+                                .time(timestamp)
                             )
+                            
                             write_api.write(bucket=bucket, org=org, record=point)
                         except (ApiException, Exception) as e:
-                            print(f"⚠️ InfluxDB write failed: {e}")
+                            print(f"⚠️ InfluxDB write failed: {e}, buffering locally.")
+                            buffer_point(point)
                     else:
                         print("⚠️ Skipping InfluxDB write (not connected).")
                 else:
@@ -114,13 +147,21 @@ try:
                     print(f"BME280 | Temp: {bme_data.temperature:.2f} °C | Pressure: {bme_data.pressure:.2f} hPa | Humidity: {bme_data.humidity:.2f} %")
 
                     if write_api:
-                        point = (
-                            Point("temperature_sensor")
-                            .field("temperature", bme_data.temperature)
-                            .field("pressure", bme_data.pressure)
-                            .field("humidity", bme_data.humidity)
-                        )
-                        write_api.write(bucket=bucket, org=org, record=point)
+                        try:
+                            timestamp = datetime.utcnow()
+                            
+                            point = (
+                                Point("temperature_sensor")
+                                .field("temperature", bme_data.temperature)
+                                .field("pressure", bme_data.pressure)
+                                .field("humidity", bme_data.humidity)
+                                .time(timestamp)
+                            )
+                            
+                            write_api.write(bucket=bucket, org=org, record=point)
+                        except (ApiException, Exception) as e:
+                            print(f"⚠️ InfluxDB write failed: {e}, buffering locally.")
+                            buffer_point(point)
                 except Exception as e:
                     print(f"⚠️ BME280 read/write failed: {e}")
 
