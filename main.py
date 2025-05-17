@@ -60,7 +60,7 @@ def buffer_point(point: influxdb_client.Point):
 
 def flush_buffered_points():
     """Try to send buffered points if any."""
-    if not os.path.exists(BUFFER_FILE):
+    if not os.path.exists(buffer_file):
         return
 
     try:
