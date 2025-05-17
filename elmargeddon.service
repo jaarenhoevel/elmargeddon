@@ -1,0 +1,14 @@
+[Unit]
+Description=Weather Logger with InfluxDB and Modbus
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/elmargeddon
+ExecStart=/bin/bash -c "source ./setup_env.sh && python main.py"
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
