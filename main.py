@@ -4,6 +4,8 @@ import smbus2
 import bme280
 import json
 
+from datetime import datetime
+
 from pymodbus.client import ModbusSerialClient
 from pymodbus.exceptions import ModbusException
 
@@ -118,16 +120,16 @@ try:
                     print(f"Wind speed: {wind_speed:.2f} m/s | Direction: {wind_direction}°")
 
                     if write_api:
-                        try:
-                            timestamp = datetime.utcnow()  # or use time.time_ns() for nanosecond precision
+                        timestamp = datetime.utcnow()  # or use time.time_ns() for nanosecond precision
                             
-                            point = (
-                                Point("wind_sensor")
-                                .field("speed", wind_speed)
-                                .field("direction", wind_direction)
-                                .time(timestamp)
-                            )
-                            
+                        point = (
+                            Point("wind_sensor")
+                            .field("speed", wind_speed)
+                            .field("direction", wind_direction)
+                            .time(timestamp)
+                        )
+                        
+                        try:                
                             write_api.write(bucket=bucket, org=org, record=point)
                         except (ApiException, Exception) as e:
                             print(f"⚠️ InfluxDB write failed: {e}, buffering locally.")
@@ -147,17 +149,17 @@ try:
                     print(f"BME280 | Temp: {bme_data.temperature:.2f} °C | Pressure: {bme_data.pressure:.2f} hPa | Humidity: {bme_data.humidity:.2f} %")
 
                     if write_api:
+                        timestamp = datetime.utcnow()
+                            
+                        point = (
+                            Point("temperature_sensor")
+                            .field("temperature", bme_data.temperature)
+                            .field("pressure", bme_data.pressure)
+                            .field("humidity", bme_data.humidity)
+                            .time(timestamp)
+                        )
+                        
                         try:
-                            timestamp = datetime.utcnow()
-                            
-                            point = (
-                                Point("temperature_sensor")
-                                .field("temperature", bme_data.temperature)
-                                .field("pressure", bme_data.pressure)
-                                .field("humidity", bme_data.humidity)
-                                .time(timestamp)
-                            )
-                            
                             write_api.write(bucket=bucket, org=org, record=point)
                         except (ApiException, Exception) as e:
                             print(f"⚠️ InfluxDB write failed: {e}, buffering locally.")
