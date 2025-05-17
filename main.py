@@ -103,6 +103,8 @@ try:
         print("Connected to Modbus. Reading every second (Ctrl+C to stop)...")
 
         while True:
+            flush_buffered_points()  # Try to send previously buffered data
+            
             # --- Read wind sensor ---
             try:
                 speed_response = client.read_holding_registers(address=0, count=1, slave=unit_id)
