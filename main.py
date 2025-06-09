@@ -14,7 +14,7 @@ from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
 from influxdb_client.rest import ApiException
 
-import meshtastic.tcp_interface
+import meshtastic.serial_interface
 from meshtastic.protobuf import telemetry_pb2, portnums_pb2
 
 from meshtastic import BROADCAST_ADDR
@@ -95,7 +95,6 @@ bme280_last_read = 0
 bme280_interval = 10  # seconds
 
 # Meshtastic Telemetry
-radio_hostname = "192.168.8.102"  # Can also be an IP
 meshtastic_last_telemetry = 0
 meshtastic_interval = 300 # seconds
 
@@ -173,7 +172,7 @@ try:
                             print("Sending Meshtastic Telemetry now")
                             meshtastic_last_telemetry = now
 
-                            iface = meshtastic.tcp_interface.TCPInterface(radio_hostname)
+                            iface = meshtastic.serial_interface.SerialInterface()
 
                             r = telemetry_pb2.Telemetry()
                             r.environment_metrics.temperature = bme_data.temperature
