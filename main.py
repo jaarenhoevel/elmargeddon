@@ -94,10 +94,6 @@ calibration_params = bme280.load_calibration_params(bus, BME280_ADDRESS)
 bme280_last_read = 0
 bme280_interval = 10  # seconds
 
-# Meshtastic Telemetry
-meshtastic_last_telemetry = time.time()
-meshtastic_interval = 600 # seconds
-
 # Telemetry Buffer
 wind_speed = 0
 wind_direction = 0
@@ -106,8 +102,6 @@ last_wind_data = 0
 try:
     # Connect to InfluxDB
     try:
-        iface = meshtastic.serial_interface.SerialInterface()
-
         influx_client = InfluxDBClient(url=url, token=token, org=org)
         write_api = influx_client.write_api(write_options=SYNCHRONOUS)
         print("Connected to InfluxDB.")
@@ -168,24 +162,6 @@ try:
                 try:
                     bme_data = bme280.sample(bus, BME280_ADDRESS, calibration_params)
                     print(f"BME280 | Temp: {bme_data.temperature:.2f} °C | Pressure: {bme_data.pressure:.2f} hPa | Humidity: {bme_data.humidity:.2f} %")
-
-                    if now - meshtastic_last_telemetry >= meshtastic_interval and now - last_wind_data < 100:
-                        try:
-                            print("Sending Meshtastic Telemetry now")
-                            meshtastic_last_telemetry = now
-
-                            
-
-                            r = telemetry_pb2.Telemetry()
-                            r.environment_metrics.temperature = bme_data.temperature
-                            r.environment_metrics.relative_humidity = bme_data.humidity
-                            r.environment_metrics.wind_direction = wind_direction
-                            r.environment_metrics.wind_speed = wind_speed
-
-                            iface.sendData(r, BROADCAST_ADDR, portnums_pb2.PortNum.TELEMETRY_APP)
-
-                        except Exception as e:
-                            print(f"⚠️ Meshtastic telemetry update failed: {e}")
 
                     if write_api:
                         timestamp = datetime.utcnow()
