@@ -14,6 +14,11 @@ from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
 from influxdb_client.rest import ApiException
 
+import meshtastic.tcp_interface
+from meshtastic.protobuf import telemetry_pb2, portnums_pb2
+
+from meshtastic import BROADCAST_ADDR
+
 # --- InfluxDB config ---
 token = os.getenv("INFLUX_TOKEN")
 if token is None:
@@ -89,6 +94,16 @@ calibration_params = bme280.load_calibration_params(bus, BME280_ADDRESS)
 bme280_last_read = 0
 bme280_interval = 10  # seconds
 
+# Meshtastic Telemetry
+radio_hostname = "192.168.8.102"  # Can also be an IP
+meshtastic_last_telemetry = 0
+meshtastic_interval = 300 # seconds
+
+# Telemetry Buffer
+wind_speed = 0
+wind_direction = 0
+last_wind_data = 0
+
 try:
     # Connect to InfluxDB
     try:
@@ -105,6 +120,8 @@ try:
         while True:
             flush_buffered_points()  # Try to send previously buffered data
             
+            now = time.time()
+
             # --- Read wind sensor ---
             try:
                 speed_response = client.read_holding_registers(address=0, count=1, slave=unit_id)
@@ -118,6 +135,8 @@ try:
                     wind_speed_raw = speed_response.registers[0]
                     wind_direction = dir_response.registers[0]
                     wind_speed = wind_speed_raw / 100.0
+
+                    last_wind_data = now
 
                     print(f"Wind speed: {wind_speed:.2f} m/s | Direction: {wind_direction}°")
 
@@ -144,11 +163,29 @@ try:
                 print(f"⚠️ Modbus error: {e}")
 
             # --- Read BME280 every 10 seconds ---
-            now = time.time()
             if now - bme280_last_read >= bme280_interval:
                 try:
                     bme_data = bme280.sample(bus, BME280_ADDRESS, calibration_params)
                     print(f"BME280 | Temp: {bme_data.temperature:.2f} °C | Pressure: {bme_data.pressure:.2f} hPa | Humidity: {bme_data.humidity:.2f} %")
+
+                    if now - meshtastic_last_telemetry >= meshtastic_interval and now - last_wind_data < 100:
+                        try:
+                            print("Sending Meshtastic Telemetry now")
+                            meshtastic_last_telemetry = now
+
+                            iface = meshtastic.tcp_interface.TCPInterface(radio_hostname)
+
+                            r = telemetry_pb2.Telemetry()
+                            r.environment_metrics.temperature = bme_data.temperature
+                            r.environment_metrics.relative_humidity = bme_data.humidity
+                            r.environment_metrics.wind_direction = wind_direction
+                            r.environment_metrics.wind_speed = wind_speed
+
+                            iface.sendData(r, BROADCAST_ADDR, portnums_pb2.PortNum.TELEMETRY_APP)
+
+                            iface.close()
+                        except Exception as e:
+                            print(f"⚠️ Meshtastic telemetry update failed: {e}")
 
                     if write_api:
                         timestamp = datetime.utcnow()
