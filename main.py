@@ -95,8 +95,8 @@ bme280_last_read = 0
 bme280_interval = 10  # seconds
 
 # Meshtastic Telemetry
-meshtastic_last_telemetry = 0
-meshtastic_interval = 300 # seconds
+meshtastic_last_telemetry = time.time()
+meshtastic_interval = 600 # seconds
 
 # Telemetry Buffer
 wind_speed = 0
@@ -177,6 +177,7 @@ try:
                             r = telemetry_pb2.Telemetry()
                             r.environment_metrics.temperature = bme_data.temperature
                             r.environment_metrics.relative_humidity = bme_data.humidity
+                            r.environment_metrics.barometric_pressure = bme_data.pressure
                             r.environment_metrics.wind_direction = wind_direction
                             r.environment_metrics.wind_speed = wind_speed
 
