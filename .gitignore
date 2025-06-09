@@ -1,1 +1,3 @@
 influx_buffer.jsonl
+env/
+setup_env.sh
