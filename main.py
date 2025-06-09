@@ -106,6 +106,8 @@ last_wind_data = 0
 try:
     # Connect to InfluxDB
     try:
+        iface = meshtastic.serial_interface.SerialInterface()
+
         influx_client = InfluxDBClient(url=url, token=token, org=org)
         write_api = influx_client.write_api(write_options=SYNCHRONOUS)
         print("Connected to InfluxDB.")
@@ -172,7 +174,7 @@ try:
                             print("Sending Meshtastic Telemetry now")
                             meshtastic_last_telemetry = now
 
-                            iface = meshtastic.serial_interface.SerialInterface()
+                            
 
                             r = telemetry_pb2.Telemetry()
                             r.environment_metrics.temperature = bme_data.temperature
@@ -182,7 +184,6 @@ try:
 
                             iface.sendData(r, BROADCAST_ADDR, portnums_pb2.PortNum.TELEMETRY_APP)
 
-                            iface.close()
                         except Exception as e:
                             print(f"⚠️ Meshtastic telemetry update failed: {e}")
 
