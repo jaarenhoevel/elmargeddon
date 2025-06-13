@@ -187,6 +187,9 @@ try:
                 try:
                     # Read CPU Temperature
                     cpu = CPUTemperature();
+
+                    print(f"CPU Temperature: {cpu.temperature}°C")
+
                     if write_api:
                         timestamp = datetime.utcnow()
                         
