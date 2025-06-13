@@ -92,7 +92,7 @@ calibration_params = bme280.load_calibration_params(bus, BME280_ADDRESS)
 
 # Timing for BME280 reads
 bme280_last_read = 0
-bme280_interval = 10  # seconds
+bme280_interval = 30  # seconds
 
 # Telemetry Buffer
 wind_speed = 0
