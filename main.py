@@ -19,6 +19,8 @@ from meshtastic.protobuf import telemetry_pb2, portnums_pb2
 
 from meshtastic import BROADCAST_ADDR
 
+from gpiozero import CPUTemperature
+
 # --- InfluxDB config ---
 token = os.getenv("INFLUX_TOKEN")
 if token is None:
@@ -181,6 +183,26 @@ try:
                             buffer_point(point)
                 except Exception as e:
                     print(f"⚠️ BME280 read/write failed: {e}")
+
+                try:
+                    # Read CPU Temperature
+                    cpu = CPUTemperature();
+                    if write_api:
+                        timestamp = datetime.utcnow()
+                        
+                        point = (
+                            Point("device_metrics")
+                            .field("cpu_temperature", cpu.temperature)
+                            .time(timestamp)
+                        )
+
+                        try:
+                            write_api.write(bucket=bucket, org=org, record=point)
+                        except (ApiException, Exception) as e:
+                            print(f"⚠️ InfluxDB write failed: {e}, buffering locally.")
+                            buffer_point(point)
+                except Exception as e:
+                    print(f"⚠️ Device metrics read failed: {e}")
 
                 bme280_last_read = now
 
