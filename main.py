@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Elmargeddon — Raspberry Pi weather station logger.
+"""Elmageddon — Raspberry Pi weather station logger.
 
 Samples wind (Modbus RTU), BME280 (I2C) and CPU temperature on independent
-intervals and writes the results to InfluxDB. Points that cannot be sent are
-buffered to a local file and retried.
+intervals and publishes the results to InfluxDB and MQTT. Points that cannot
+be sent to InfluxDB are buffered to a local file and retried. MQTT publishes
+each field to `weather/elmageddon/<measurement>/<field>` and announces the
+entities to Home Assistant via `homeassistant/sensor/...` auto-discovery.
 
-Each sensor is a small class implementing `sample() -> list[Point]`; the main
-loop just schedules them by interval and hands their points to an `InfluxSink`
-that handles writing and on-disk buffering. Add or swap a sensor by editing
-the relevant class and one entry in `build_sensors`.
+Each sensor is a small class implementing `sample() -> list[Reading]` and
+declaring its `entities` (fields with units / device classes). The scheduler
+hands readings to a list of sinks; add a sink (or swap a sensor) without
+touching the loop.
 """
 
+import json
 import os
 import time
 from abc import ABC, abstractmethod
@@ -19,6 +22,7 @@ from datetime import datetime
 
 import smbus2
 import bme280
+import paho.mqtt.client as mqtt
 from pymodbus.client import ModbusSerialClient
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
@@ -78,6 +82,13 @@ class Config:
     buffer_file: str = "influx_buffer.jsonl"
     loop_sleep: float = 1.0          # how often the scheduler wakes up
     flush_interval: float = 10.0    # how often to retry buffered points
+    # MQTT — optional; if MQTT_HOST is unset, MQTT publishing is skipped.
+    mqtt_host: str = ""
+    mqtt_port: int = 1883
+    mqtt_user: str = ""
+    mqtt_password: str = ""
+    mqtt_prefix: str = "weather/elmageddon"   # data topic prefix
+    mqtt_node: str = "elmageddon"             # HA node / device identifier
 
     @classmethod
     def from_env(cls):
@@ -88,7 +99,35 @@ class Config:
             influx_bucket=require_env("INFLUX_BUCKET"),
             modbus_device=require_env("MODBUS_DEVICE"),
             buffer_file=optional_env("BUFFER_FILE", "influx_buffer.jsonl"),
+            mqtt_host=optional_env("MQTT_HOST", ""),
+            mqtt_port=int(optional_env("MQTT_PORT", "1883")),
+            mqtt_user=optional_env("MQTT_USER", ""),
+            mqtt_password=optional_env("MQTT_PASSWORD", ""),
+            mqtt_prefix=optional_env("MQTT_PREFIX", "weather/elmageddon"),
+            mqtt_node=optional_env("MQTT_NODE", "elmageddon"),
         )
+
+
+# --------------------------------------------------------------------------
+# Readings & entities — the sensor output model shared by all sinks.
+# --------------------------------------------------------------------------
+@dataclass
+class Reading:
+    """A single measured value: one field of one measurement."""
+    measurement: str
+    field: str
+    value: float
+
+
+@dataclass
+class Entity:
+    """Declaration of a publishable field, used for HA auto-discovery."""
+    measurement: str
+    field: str
+    name: str            # friendly name shown in Home Assistant
+    unit: str = ""
+    device_class: str = ""
+    icon: str = ""
 
 
 # --------------------------------------------------------------------------
@@ -122,11 +161,25 @@ class Buffer:
 
 
 # --------------------------------------------------------------------------
-# InfluxSink — write points now, buffer on failure, retry the buffer.
-# Unlike the original, points are buffered even when InfluxDB was never
-# reached, so transient outages no longer drop data.
+# Sinks
 # --------------------------------------------------------------------------
-class InfluxSink:
+class Sink(ABC):
+    """Receives the readings produced by each sensor sample."""
+
+    @abstractmethod
+    def publish(self, readings: list[Reading]) -> None: ...
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+class InfluxSink(Sink):
+    """Writes readings to InfluxDB, grouped into one point per measurement
+    (preserving the multi-field schema). Failed writes are buffered to disk."""
+
     def __init__(self, config):
         self.bucket = config.influx_bucket
         self.org = config.influx_org
@@ -137,7 +190,20 @@ class InfluxSink:
         self.write_api = self.client.write_api(write_options=SYNCHRONOUS)
         log_info("InfluxDB client ready")
 
-    def write(self, point):
+    def publish(self, readings):
+        if not readings:
+            return
+        by_measurement: dict[str, list[Reading]] = {}
+        for r in readings:
+            by_measurement.setdefault(r.measurement, []).append(r)
+        timestamp = datetime.utcnow()
+        for measurement, group in by_measurement.items():
+            point = Point(measurement).time(timestamp)
+            for r in group:
+                point = point.field(r.field, r.value)
+            self._write(point)
+
+    def _write(self, point):
         try:
             self.write_api.write(bucket=self.bucket, org=self.org, record=point)
         except Exception as e:
@@ -153,20 +219,85 @@ class InfluxSink:
         self.client.close()
 
 
+class MqttSink(Sink):
+    """Publishes each field to `<prefix>/<measurement>/<field>` and announces
+    entities to Home Assistant via `homeassistant/sensor/<node>/<id>/config`.
+    Best-effort: paho queues and reconnects automatically while the broker is
+    unreachable; InfluxDB remains the durable store."""
+
+    def __init__(self, config, sensors):
+        self.prefix = config.mqtt_prefix
+        self.node = config.mqtt_node
+        self.entities = [e for s in sensors for e in s.entities]
+
+        try:
+            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=self.node)
+        except AttributeError:  # paho-mqtt < 2.0 has no CallbackAPIVersion
+            client = mqtt.Client(client_id=self.node)
+
+        if config.mqtt_user:
+            client.username_pw_set(config.mqtt_user, config.mqtt_password)
+        client.reconnect_delay_set(min_delay=1, max_delay=120)
+        client.on_connect = self._on_connect
+        self.client = client
+        self.client.connect(config.mqtt_host, config.mqtt_port, 60)
+        self.client.loop_start()
+        log_info(f"MQTT connecting to {config.mqtt_host}:{config.mqtt_port}")
+
+    def _on_connect(self, client, userdata, flags, rc):
+        if rc != 0:
+            log_warn(f"MQTT connect rejected (rc={rc})")
+            return
+        log_info("MQTT connected")
+        self._publish_discovery()
+
+    def _publish_discovery(self):
+        for e in self.entities:
+            topic = f"homeassistant/sensor/{self.node}/{e.measurement}_{e.field}/config"
+            payload = {
+                "name": e.name,
+                "state_topic": f"{self.prefix}/{e.measurement}/{e.field}",
+                "unique_id": f"{self.node}_{e.measurement}_{e.field}",
+                "device": {
+                    "identifiers": [self.node],
+                    "name": "Elmageddon",
+                    "model": "Weather Station",
+                },
+            }
+            if e.unit:
+                payload["unit_of_measurement"] = e.unit
+            if e.device_class:
+                payload["device_class"] = e.device_class
+            if e.icon:
+                payload["icon"] = e.icon
+            self.client.publish(topic, json.dumps(payload), retain=True)
+
+    def publish(self, readings):
+        for r in readings:
+            topic = f"{self.prefix}/{r.measurement}/{r.field}"
+            self.client.publish(topic, str(r.value))
+
+    def close(self):
+        self.client.loop_stop()
+        self.client.disconnect()
+
+
 # --------------------------------------------------------------------------
 # Sensors
 # --------------------------------------------------------------------------
 class Sensor(ABC):
-    """A device sampled on a fixed interval. `sample()` returns InfluxDB Points."""
+    """A device sampled on a fixed interval. `sample()` returns readings and
+    `entities` declares them for Home Assistant discovery."""
 
     name = "sensor"
+    entities: list[Entity] = []
 
     def __init__(self, interval):
         self.interval = interval
         self.last_sample = 0.0
 
     @abstractmethod
-    def sample(self) -> list[Point]:
+    def sample(self) -> list[Reading]:
         ...
 
     def close(self):
@@ -177,6 +308,10 @@ class WindSensor(Sensor):
     """Anemometer over Modbus RTU. Register 0 = speed (/100 → m/s), 1 = direction."""
 
     name = "wind"
+    entities = [
+        Entity("wind_sensor", "speed", "Wind Speed", "m/s", "wind_speed"),
+        Entity("wind_sensor", "direction", "Wind Direction", "°", "", "mdi:compass"),
+    ]
 
     def __init__(self, client, unit_id, interval=1.0):
         super().__init__(interval)
@@ -191,10 +326,10 @@ class WindSensor(Sensor):
         speed = speed_resp.registers[0] / 100.0
         direction = dir_resp.registers[0]
         log_info(f"wind   {speed:5.2f} m/s  {direction:3d}°")
-        return [Point("wind_sensor")
-                .field("speed", speed)
-                .field("direction", direction)
-                .time(datetime.utcnow())]
+        return [
+            Reading("wind_sensor", "speed", speed),
+            Reading("wind_sensor", "direction", direction),
+        ]
 
     def close(self):
         self.client.close()
@@ -204,6 +339,11 @@ class Bme280Sensor(Sensor):
     """BME280 temperature/pressure/humidity over I2C."""
 
     name = "bme280"
+    entities = [
+        Entity("temperature_sensor", "temperature", "Temperature", "°C", "temperature"),
+        Entity("temperature_sensor", "pressure", "Pressure", "hPa", "pressure"),
+        Entity("temperature_sensor", "humidity", "Humidity", "%", "humidity"),
+    ]
 
     def __init__(self, bus, address, calibration, interval=30.0):
         super().__init__(interval)
@@ -214,11 +354,11 @@ class Bme280Sensor(Sensor):
     def sample(self):
         d = bme280.sample(self.bus, self.address, self.calibration)
         log_info(f"bme280  {d.temperature:5.2f} °C  {d.pressure:7.2f} hPa  {d.humidity:5.2f} %")
-        return [Point("temperature_sensor")
-                .field("temperature", d.temperature)
-                .field("pressure", d.pressure)
-                .field("humidity", d.humidity)
-                .time(datetime.utcnow())]
+        return [
+            Reading("temperature_sensor", "temperature", d.temperature),
+            Reading("temperature_sensor", "pressure", d.pressure),
+            Reading("temperature_sensor", "humidity", d.humidity),
+        ]
 
     def close(self):
         self.bus.close()
@@ -228,6 +368,9 @@ class CpuTempSensor(Sensor):
     """On-board CPU temperature via gpiozero."""
 
     name = "cpu"
+    entities = [
+        Entity("device_metrics", "cpu_temperature", "CPU Temperature", "°C", "temperature"),
+    ]
 
     def __init__(self, interval=30.0):
         super().__init__(interval)
@@ -236,9 +379,7 @@ class CpuTempSensor(Sensor):
     def sample(self):
         temp = self._probe.temperature
         log_info(f"cpu    {temp:5.2f} °C")
-        return [Point("device_metrics")
-                .field("cpu_temperature", temp)
-                .time(datetime.utcnow())]
+        return [Reading("device_metrics", "cpu_temperature", temp)]
 
 
 def build_sensors(config):
@@ -275,32 +416,49 @@ def build_sensors(config):
     return sensors
 
 
+def build_sinks(config, sensors):
+    """Construct sinks. InfluxDB is required; MQTT is optional (skipped when
+    MQTT_HOST is unset or the broker can't be reached)."""
+    sinks: list[Sink] = [InfluxSink(config)]
+
+    if config.mqtt_host:
+        try:
+            sinks.append(MqttSink(config, sensors))
+        except Exception as e:
+            log_warn(f"mqtt   {e}, skipping")
+    else:
+        log_info("mqtt   MQTT_HOST unset, skipping")
+
+    return sinks
+
+
 # --------------------------------------------------------------------------
 # Scheduler
 # --------------------------------------------------------------------------
-def sample_sensor(sensor, sink):
+def sample_sensor(sensor, sinks):
     try:
-        points = sensor.sample()
+        readings = sensor.sample()
     except Exception as e:
         warn_once(sensor.name, f"{sensor.name}   {e}")
         return
     clear_warning(sensor.name)
-    for point in points:
-        sink.write(point)
+    for sink in sinks:
+        sink.publish(readings)
 
 
-def run(sensors, sink, config):
-    log_info(f"logging {len(sensors)} sensor(s) (Ctrl+C to stop)")
+def run(sensors, sinks, config):
+    log_info(f"logging {len(sensors)} sensor(s) to {len(sinks)} sink(s) (Ctrl+C to stop)")
     last_flush = 0.0
     try:
         while True:
             now = time.time()
             for sensor in sensors:
                 if now - sensor.last_sample >= sensor.interval:
-                    sample_sensor(sensor, sink)
+                    sample_sensor(sensor, sinks)
                     sensor.last_sample = now
             if now - last_flush >= config.flush_interval:
-                sink.flush()
+                for sink in sinks:
+                    sink.flush()
                 last_flush = now
             time.sleep(config.loop_sleep)
     except KeyboardInterrupt:
@@ -309,14 +467,15 @@ def run(sensors, sink, config):
 
 def main():
     config = Config.from_env()
-    sink = InfluxSink(config)
     sensors = build_sensors(config)
+    sinks = build_sinks(config, sensors)
     try:
-        run(sensors, sink, config)
+        run(sensors, sinks, config)
     finally:
+        for sink in sinks:
+            sink.close()
         for sensor in sensors:
             sensor.close()
-        sink.close()
         log_info("stopped")
 
 
