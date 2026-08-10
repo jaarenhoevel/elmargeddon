@@ -258,6 +258,7 @@ class MqttSink(Sink):
                 "name": e.name,
                 "state_topic": f"{self.prefix}/{e.measurement}/{e.field}",
                 "unique_id": f"{self.node}_{e.measurement}_{e.field}",
+                "state_class": "measurement",
                 "device": {
                     "identifiers": [self.node],
                     "name": "Elmageddon",
