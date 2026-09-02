@@ -239,6 +239,7 @@ class MqttSink(Sink):
             client.username_pw_set(config.mqtt_user, config.mqtt_password)
         client.reconnect_delay_set(min_delay=1, max_delay=120)
         client.on_connect = self._on_connect
+        client.on_disconnect = self._on_disconnect
         self.client = client
         self.client.connect(config.mqtt_host, config.mqtt_port, 60)
         self.client.loop_start()
@@ -250,6 +251,9 @@ class MqttSink(Sink):
             return
         log_info("MQTT connected")
         self._publish_discovery()
+
+    def _on_disconnect(self, client, userdata, rc):
+        log_warn(f"MQTT disconnected (rc={rc})")
 
     def _publish_discovery(self):
         for e in self.entities:
